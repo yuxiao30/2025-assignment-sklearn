@@ -1,137 +1,127 @@
 # ##################################################
 # YOU SHOULD NOT TOUCH THIS FILE !
 # ##################################################
+import pytest
 import numpy as np
 import pandas as pd
+from numpy.testing import assert_array_equal
 
-from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.metrics.pairwise import pairwise_distances
-from sklearn.model_selection import BaseCrossValidator
-from sklearn.utils.validation import check_is_fitted, validate_data
+from sklearn.utils.estimator_checks import check_estimator
+from sklearn.model_selection import train_test_split
+from sklearn.utils import shuffle
+from sklearn.datasets import make_classification
+from sklearn.neighbors import KNeighborsClassifier
 
-
-class KNearestNeighbors(ClassifierMixin, BaseEstimator):
-    """K-nearest neighbors classifier (Euclidean distance, uniform weights)."""
-
-    def __init__(self, n_neighbors=1):  # noqa: D107
-        self.n_neighbors = n_neighbors
-
-    def fit(self, X, y):
-        """Store training data.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Training samples.
-        y : array-like of shape (n_samples,)
-            Target labels.
-
-        Returns
-        -------
-        self : object
-            Fitted estimator.
-        """
-        X, y = validate_data(self, X, y=y, reset=True)
-
-        if not isinstance(self.n_neighbors, (int, np.integer)):
-            raise TypeError("n_neighbors must be an integer.")
-        if self.n_neighbors <= 0:
-            raise ValueError("n_neighbors must be >= 1.")
-
-        self.X_ = X
-        self.y_ = y
-        self.classes_ = np.unique(y)
-        return self
-
-    def predict(self, X):
-        """Predict class labels for samples in X.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_test_samples, n_features)
-            Test samples.
-
-        Returns
-        -------
-        y_pred : ndarray of shape (n_test_samples,)
-            Predicted labels.
-        """
-        check_is_fitted(self, attributes=["X_", "y_", "classes_"])
-        X = validate_data(self, X, reset=False)
-
-        n_train = self.X_.shape[0]
-        k = min(int(self.n_neighbors), n_train)
-
-        # Distances shape: (n_test, n_train)
-        distances = pairwise_distances(X, self.X_, metric="euclidean")
-        neigh_idx = np.argsort(distances, axis=1)[:, :k]
-        neigh_y = self.y_[neigh_idx]
-
-        # Majority vote with deterministic tie-break:
-        # choose the smallest class (same as argmax over bincount).
-        class_to_int = {c: i for i, c in enumerate(self.classes_)}
-        neigh_int = np.vectorize(class_to_int.get, otypes=[int])(neigh_y)
-
-        n_classes = self.classes_.shape[0]
-        pred_int = np.empty(neigh_int.shape[0], dtype=int)
-        for i in range(neigh_int.shape[0]):
-            counts = np.bincount(neigh_int[i], minlength=n_classes)
-            pred_int[i] = int(np.argmax(counts))
-
-        return self.classes_[pred_int]
-
-    def score(self, X, y):
-        """Return mean accuracy on (X, y)."""
-        X, y = validate_data(self, X, y=y, reset=False)
-        y_pred = self.predict(X)
-        return float(np.mean(y_pred == y))
+from sklearn_questions import KNearestNeighbors
+from sklearn_questions import MonthlySplit
 
 
-class MonthlySplit(BaseCrossValidator):
-    """Cross-validator that trains on month M and tests on month M+1.
+@pytest.mark.parametrize("k", [1, 3, 5, 7])
+def test_one_nearest_neighbor_match_sklearn(k):
+    X, y = make_classification(n_samples=200, n_features=20,
+                               random_state=42)
+    X_train, X_test, y_train, y_test = \
+        train_test_split(X, y, random_state=42)
+    knn = KNeighborsClassifier(n_neighbors=k)
+    y_pred_sk = knn.fit(X_train, y_train).predict(X_test)
 
-    Parameters
-    ----------
-    time_col : str, default='index'
-        If 'index', uses X.index (must be datetime-like).
-        Otherwise uses X[time_col] (must be datetime-like).
-    """
+    onn = KNearestNeighbors(k)
+    y_pred_me = onn.fit(X_train, y_train).predict(X_test)
+    assert_array_equal(y_pred_me, y_pred_sk)
 
-    def __init__(self, time_col="index"):  # noqa: D107
-        self.time_col = time_col
+    assert onn.score(X_test, y_test) == knn.score(X_test, y_test)
 
-    def __repr__(self):
-        # Test expects EXACT string formatting with single quotes.
-        return f"MonthlySplit(time_col='{self.time_col}')"
 
-    def _get_time_values(self, X):
-        """Return datetime-like values used for splitting."""
-        if self.time_col == "index":
-            time_values = X.index
-        else:
-            time_values = X[self.time_col]
+@pytest.mark.parametrize("k", [1, 3, 5, 7])
+def test_one_nearest_neighbor_check_estimator(k):
+    check_estimator(KNearestNeighbors(n_neighbors=k))
 
-        if not pd.api.types.is_datetime64_any_dtype(time_values):
-            raise ValueError("The time column/index must be datetime type.")
-        return time_values
 
-    def get_n_splits(self, X, y=None, groups=None):
-        """Return number of splits (n_months - 1)."""
-        time_values = self._get_time_values(X)
-        months = pd.PeriodIndex(time_values, freq="M").unique().sort_values()
-        return max(len(months) - 1, 0)
+@pytest.mark.parametrize("end_date, expected_splits",
+                         [('2021-01-31', 12), ('2020-12-31', 11)])
+@pytest.mark.parametrize("shuffle_data", [True, False])
+def test_time_split(end_date, expected_splits, shuffle_data):
 
-    def split(self, X, y=None, groups=None):
-        """Yield (train_idx, test_idx) for successive months."""
-        time_values = self._get_time_values(X)
-        months = pd.PeriodIndex(time_values, freq="M")
-        unique_months = months.unique().sort_values()
+    date = pd.date_range(start='2020-01-01', end=end_date, freq='D')
+    n_samples = len(date)
+    X = pd.DataFrame(range(n_samples), index=date, columns=['val'])
+    y = pd.DataFrame(
+        np.array([i % 2 for i in range(n_samples)]),
+        index=date
+    )
 
-        for i in range(len(unique_months) - 1):
-            train_month = unique_months[i]
-            test_month = unique_months[i + 1]
+    if shuffle_data:
+        X, y = shuffle(X, y, random_state=0)
 
-            idx_train = np.flatnonzero(months == train_month)
-            idx_test = np.flatnonzero(months == test_month)
+    X_1d = X['val']
 
-            yield idx_train, idx_test
+    cv = MonthlySplit()
+    cv_repr = "MonthlySplit(time_col='index')"
+
+    # Test if the repr works without any errors
+    assert cv_repr == repr(cv)
+
+    # Test if get_n_splits works correctly
+    assert cv.get_n_splits(X, y) == expected_splits
+
+    # Test if the cross-validator works as expected even if
+    # the data is 1d
+    np.testing.assert_equal(
+        list(cv.split(X, y)), list(cv.split(X_1d, y))
+    )
+
+    # Test that train, test indices returned are integers and
+    # data is correctly ordered
+    for train, test in cv.split(X, y):
+        assert np.asarray(train).dtype.kind == "i"
+        assert np.asarray(test).dtype.kind == "i"
+
+        X_train, X_test = X.iloc[train], X.iloc[test]
+        y_train, y_test = y.iloc[train], y.iloc[test]
+        assert X_train.index.max() < X_test.index.min()
+        assert y_train.index.max() < y_test.index.min()
+        assert X.index.equals(y.index)
+
+    with pytest.raises(ValueError, match='datetime'):
+        cv = MonthlySplit(time_col='val')
+        next(cv.split(X, y))
+
+
+@pytest.mark.parametrize("end_date", ['2021-01-31', '2020-12-31'])
+@pytest.mark.parametrize("shuffle_data", [True, False])
+def test_time_split_on_column(end_date, shuffle_data):
+
+    date = pd.date_range(
+        start='2020-01-01 00:00', end=end_date, freq='D'
+    )
+    n_samples = len(date)
+    X = pd.DataFrame({'val': range(n_samples), 'date': date})
+    y = pd.DataFrame(
+        np.array([i % 2 for i in range(n_samples)])
+    )
+
+    if shuffle_data:
+        X, y = shuffle(X, y, random_state=0)
+
+    cv = MonthlySplit(time_col='date')
+
+    # Test that train, test indices returned are integers and
+    # data is correctly ordered
+    n_splits = 0
+    last_time = None
+    for train, test in cv.split(X, y):
+
+        X_train, X_test = X.iloc[train], X.iloc[test]
+        assert X_train['date'].max() < X_test['date'].min()
+        assert X_train['date'].dt.month.nunique() == 1
+        assert X_test['date'].dt.month.nunique() == 1
+        assert X_train['date'].dt.year.nunique() == 1
+        assert X_test['date'].dt.year.nunique() == 1
+        if last_time is not None:
+            assert X_test['date'].min() > last_time
+        last_time = X_test['date'].max()
+        n_splits += 1
+
+    assert 'idx' not in X.columns
+
+    assert n_splits == cv.get_n_splits(X, y)

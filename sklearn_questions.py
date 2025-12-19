@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.model_selection import BaseCrossValidator
